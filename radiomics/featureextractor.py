@@ -11,6 +11,7 @@ import pathlib
 import pykwalify.core
 import SimpleITK as sitk
 import six
+import sys
 
 from radiomics import generalinfo, getFeatureClasses, getImageTypes, getParameterValidationFiles, imageoperations
 
@@ -200,7 +201,7 @@ class RadiomicsFeatureExtractor:
 
     logger.debug("Settings: %s", settings)
 
-  def execute(self, imageFilepath, maskFilepath, label=None, label_channel=None, voxelBased=False):
+  def execute(self, imageFilepath, maskFilepath, otherImageFilePath=None, label=None, label_channel=None, voxelBased=False):
     """
     Compute radiomics signature for provide image and mask combination. It comprises of the following steps:
 
@@ -269,7 +270,7 @@ class RadiomicsFeatureExtractor:
 
     # 1. Load the image and mask
     featureVector = collections.OrderedDict()
-    image, mask = self.loadImage(imageFilepath, maskFilepath, generalInfo, **_settings)
+    image, mask = self.loadImage(imageFilepath, maskFilepath, otherImageFilePath, generalInfo, **_settings)
 
     # 2. Check whether loaded mask contains a valid ROI for feature extraction and get bounding box
     # Raises a ValueError if the ROI is invalid
@@ -334,7 +335,7 @@ class RadiomicsFeatureExtractor:
     return featureVector
 
   @staticmethod
-  def loadImage(ImageFilePath, MaskFilePath, generalInfo=None, **kwargs):
+  def loadImage(ImageFilePath, MaskFilePath, otherImageFilePath, generalInfo=None, **kwargs):
     """
     Load and pre-process the image and labelmap.
     If ImageFilePath is a string, it is loaded as SimpleITK Image and assigned to ``image``,
@@ -380,6 +381,34 @@ class RadiomicsFeatureExtractor:
       mask = MaskFilePath
     else:
       raise ValueError('Error reading mask Filepath or SimpleITK object')
+
+    # Read other image for washin
+    if otherImageFilePath is not None:
+      if isinstance(otherImageFilePath, six.string_types) and os.path.isfile(otherImageFilePath):
+        imageOther = sitk.ReadImage(otherImageFilePath)
+      elif isinstance(otherImageFilePath, sitk.SimpleITK.Image):
+        imageOther = otherImageFilePath
+      else:
+        raise ValueError('Error reading image Filepath or SimpleITK object')
+
+      # Align input types
+      caster = sitk.CastImageFilter()
+      caster.SetOutputPixelType(sitk.sitkFloat64)
+      image = caster.Execute(image)
+      imageOther = caster.Execute(imageOther)
+
+      # t1 - t0
+      f_subtract = sitk.SubtractImageFilter()
+      wash = f_subtract.Execute(imageOther, image)
+      # (t1 - t0) / t0
+      f_divide = sitk.DivideImageFilter()
+      wash = f_divide.Execute(wash, image)
+
+      # Replace max Values with 0
+      f_less = sitk.LessEqualImageFilter()
+      value_mask = f_less.Execute(wash, sys.float_info.max / 2)
+      f_mask = sitk.MaskImageFilter()
+      image = f_mask.Execute(wash, value_mask)
 
     # process the mask
     mask = imageoperations.getMask(mask, **kwargs)
